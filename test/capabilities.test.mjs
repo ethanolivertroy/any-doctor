@@ -50,6 +50,16 @@ export async function doctor(ctx) {
   assert.equal(r.red[1].line, 4);
 });
 
+test("scanner: red for direct Node runtime escape hatches", () => {
+  const r = scan(`
+const fs = process.getBuiltinModule("node:fs");
+const internals = process.binding("natives");
+process.dlopen({}, "native.node");
+export async function doctor(ctx) {}`);
+  assert.equal(r.red.length, 3, "all process escape hatches are red");
+  assert.ok(r.red.every(f => f.capability === "runtime escape"));
+});
+
 test("scanner: yellow for direct fs reads and env, never red", () => {
   const r = scan(`
 const src = fs.readFileSync("a.ts", "utf8");
@@ -211,6 +221,66 @@ test("network globals are stripped: a smuggled fetch is not a function", async (
     "fetch does not exist in the doctor process",
   );
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("runner: computed runtime escapes cannot read host files or inherited environment", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { runDoctor } = await import("../bin/runner.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-runtime-"));
+  const target = path.join(dir, "target");
+  const outside = path.join(dir, "host-only.txt");
+  const doctor = path.join(dir, "smuggler.mjs");
+  const secretName = "ANY_DOCTOR_RUNTIME_ESCAPE_SENTINEL";
+  const previous = process.env[secretName];
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "proof.ts"), "export const proof = true;\n");
+  fs.writeFileSync(outside, "host-file-sentinel");
+  process.env[secretName] = "environment-sentinel";
+  fs.writeFileSync(doctor, [
+    "export const meta = { id: 'smuggler', description: 's', severity: 'info' };",
+    'const getBuiltin = process["getBuiltin" + "Module"];',
+    'const env = process["en" + "v"];',
+    "export async function doctor(ctx) {",
+    '  let host = "blocked";',
+    `  if (typeof getBuiltin === "function") host = getBuiltin("node:" + "fs").readFileSync(${JSON.stringify(outside)}, "utf8");`,
+    `  ctx.report.finding({ file: "proof.ts", line: 1, message: String(env[${JSON.stringify(secretName)}]) + "|" + host });`,
+    "}",
+  ].join("\n"));
+
+  try {
+    const result = await runDoctor({ programPath: doctor, targetDir: target });
+    assert.equal(result.findings[0]?.message, "undefined|blocked");
+  } finally {
+    if (previous === undefined) delete process.env[secretName];
+    else process.env[secretName] = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runner: output above the limit terminates the doctor", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { runDoctor } = await import("../bin/runner.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-output-"));
+  const target = path.join(dir, "target");
+  const doctor = path.join(dir, "noisy.mjs");
+  fs.mkdirSync(target);
+  fs.writeFileSync(doctor, [
+    "export const meta = { id: 'noisy', description: 'n', severity: 'info' };",
+    'export async function doctor() { process.stdout.write("x".repeat(17_000_000)); }',
+  ].join("\n"));
+
+  try {
+    await assert.rejects(
+      runDoctor({ programPath: doctor, targetDir: target }),
+      (e) => e._tag === "DoctorCrashed" && /output limit/i.test(e.detail),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("repo doctors all scan clean (dogfood)", async () => {

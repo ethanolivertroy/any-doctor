@@ -6,6 +6,7 @@ import { runOnce, certify, ClaimContractViolation } from "./certify.js";
 import type { DoctorModule } from "./certify.js";
 import * as contract from "./contract.js";
 import type { Mode } from "./contract.js";
+import { analysisStatus } from "./analysis.js";
 
 // The doctor loader: the child process every doctor program runs inside.
 // It owns the Doctor-run choreography — decode the Mode, confine the
@@ -25,14 +26,26 @@ export function confineProcess(): void {
   const g = globalThis as Record<string, unknown>;
   delete g.fetch;
   try { delete g.WebSocket; } catch { /* already absent */ }
-  try {
-    register(new URL("./import-guard.mjs", import.meta.url));
-  } catch {
-    // No loader hooks on this runtime — the other confinement layers still apply.
+  // ESM resolution hooks cannot intercept process.getBuiltinModule(), which
+  // bypasses import resolution entirely. Remove public module-loading escape
+  // hatches before importing doctor code. The loader initializes its trusted
+  // native parser first, then removes process.dlopen so doctor code cannot
+  // load an add-on of its own. The doctor only receives ctx.
+  const runtime = process as unknown as Record<string, unknown>;
+  for (const name of ["getBuiltinModule", "binding", "_linkedBinding", "dlopen", "mainModule"]) {
+    try {
+      Object.defineProperty(runtime, name, { value: undefined, configurable: false, writable: false });
+    } catch {
+      try { runtime[name] = undefined; } catch { /* unavailable on this runtime */ }
+    }
   }
+  // This hook is the import boundary for the untrusted module. Continuing
+  // without it would make a computed dynamic import a network escape, so a
+  // runtime that cannot install it must fail before doctor code is loaded.
+  register(new URL("./import-guard.mjs", import.meta.url));
 }
 
-const USAGE = "usage: doctor-loader.mjs <program.(m)js> <root> [--include-tests] | <program.(m)js> --verify <fixtures.(m)js> | <program.(m)js> --meta";
+const USAGE = "usage: doctor-loader.mjs <program.mjs> <root> [--include-tests] | <program.mjs> --verify <fixtures.mjs> | <program.mjs> --meta";
 
 const SEVERITIES = new Set(["error", "warning", "info"]);
 
@@ -50,9 +63,9 @@ function validateMeta(mod: DoctorModule): void {
 }
 
 async function main(): Promise<void> {
-  confineProcess();
-
-  // The mode arrives as argv and is decoded exactly once, here, into a value.
+  // Decode before confinement so unsupported entrypoints can be rejected
+  // without loading any doctor code. The .mjs restriction is essential:
+  // module.register() hooks guard ESM resolution, not CommonJS require().
   const decoded = contract.decodeLoaderArgs(process.argv.slice(2));
   if (decoded === null) {
     console.error(USAGE);
@@ -60,6 +73,16 @@ async function main(): Promise<void> {
   }
   const prog = decoded.program;
   const mode: Mode = decoded.mode;
+  if (path.extname(prog) !== ".mjs") {
+    console.error("doctor programs must use the .mjs ESM format; CommonJS entrypoints are not confined");
+    process.exit(3);
+  }
+
+  // Load the package-owned parser before removing native-loading APIs. This
+  // keeps semantic checks available without granting that capability to a
+  // doctor module imported below.
+  analysisStatus();
+  confineProcess();
 
   const mod = (await import(pathToFileURL(prog).href)) as DoctorModule;
   if (typeof mod.doctor !== "function") {

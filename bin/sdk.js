@@ -463,6 +463,10 @@ function runSearch(query, language, root, includeTests) {
     }
     return toMatches((_a = response.matches) !== null && _a !== void 0 ? _a : [], root);
 }
+// The parent applies the matching outbound cap before writing a response.
+// Keep this synchronous protocol reader bounded as a second line of defense:
+// a compromised or future host must not make doctor memory unbounded.
+const MAX_HOST_RESPONSE_BYTES = 16 * 1024 * 1024;
 function runAnalysis(body, root) {
     let response;
     try {
@@ -482,6 +486,9 @@ function readSearchResponse() {
         const n = fs.readSync(0, chunk, 0, chunk.length, null);
         if (n === 0)
             throw new Error("search host channel closed");
+        if (Buffer.byteLength(buffer) + n > MAX_HOST_RESPONSE_BYTES) {
+            throw new Error("search host response exceeded the 16 MiB protocol limit");
+        }
         buffer += chunk.toString("utf8", 0, n);
         const nl = buffer.indexOf("\n");
         if (nl !== -1) {

@@ -93,7 +93,9 @@ npx any-doctor@latest verify doctors/your-doctor.mjs
 the exit code stays non-zero until every fixture passes. The skill teaches the sharp edges
 (scope-analysis semantics, fixture-seed worlds, the adversarial
 counter-fixture pass). Passing these cases does not measure general accuracy.
-No project install needed; `verify` sandboxes the doctor runs.
+No project install needed; `verify` runs each `.mjs` doctor under the required Node
+permission model (Node 20 or newer). CommonJS (`.cjs`) and ambiguous `.js`
+entrypoints are rejected so the ESM import boundary remains enforceable.
 
 ## CI: the gate
 
@@ -124,9 +126,11 @@ npx any-doctor@latest run --all --fail-on warning --base origin/main
   a suggested change can still require judgment.
 - **Blind spots are data.** Every doctor declares what it cannot see, and
   the report renders those declarations beside the findings.
-- **Doctors are confined.** The runtime capability gate refuses to execute
-  a doctor that imports, writes, spawns, or touches the network — a
-  malicious doctor is refused before it runs, with no override.
+- **Doctors are confined.** Each doctor runs with a minimal environment,
+  only the doctor/target paths readable, no imports or Node module-loading
+  escape hatches, and bounded protocol output. The capability gate rejects
+  obvious violations before execution; this is not a substitute for an OS
+  sandbox when running fully hostile code.
 - **The score summarizes files without reported findings**, per doctor and overall.
   It is not a probability of correctness or proof that unexamined code is safe.
 

@@ -100,8 +100,9 @@ export function handleAnalysisRequest(
   status: Status = analysisStatus,
   spansAnalyzer: SpansAnalyzer = analyzeSpans,
   callsAnalyzer: typeof analyzeCalls = analyzeCalls,
+  allowedRoot?: string,
 ): AnalysisResponse {
-  const base = searchBase(mode);
+  const base = allowedRoot ?? searchBase(mode);
   const root = typeof req.root === "string" ? path.resolve(req.root) : "";
   if (base === "" || !withinBase(root, base)) {
     return { error: "ctx.analysis failed: analysis root is outside the allowed target" };

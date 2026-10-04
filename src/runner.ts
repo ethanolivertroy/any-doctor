@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { Readable } from "node:stream";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -51,11 +52,15 @@ export class DoctorUnsafe extends Schema.TaggedError<DoctorUnsafe>()("DoctorUnsa
   findings: Schema.Array(Schema.String),
 }) {}
 
-export type RunnerError = ProgramMissing | FixturesMissing | ScaffoldIncomplete | DoctorCrashed | NoFramedResult | DoctorUnsafe;
+export class RuntimeConfinementUnavailable extends Schema.TaggedError<RuntimeConfinementUnavailable>()("RuntimeConfinementUnavailable", {
+  detail: Schema.String,
+}) {}
+
+export type RunnerError = ProgramMissing | FixturesMissing | ScaffoldIncomplete | DoctorCrashed | NoFramedResult | DoctorUnsafe | RuntimeConfinementUnavailable;
 
 export function isRunnerError(e: unknown): e is RunnerError {
   return e instanceof ProgramMissing || e instanceof FixturesMissing || e instanceof ScaffoldIncomplete
-    || e instanceof DoctorCrashed || e instanceof NoFramedResult || e instanceof DoctorUnsafe;
+    || e instanceof DoctorCrashed || e instanceof NoFramedResult || e instanceof DoctorUnsafe || e instanceof RuntimeConfinementUnavailable;
 }
 
 export function describeRunnerError(e: RunnerError): string {
@@ -68,6 +73,7 @@ export function describeRunnerError(e: RunnerError): string {
     case "NoFramedResult": return "doctor produced no framed result — stdout was:\n" + e.stdout;
     case "DoctorUnsafe": return "\ud83d\uded1 " + unsafeRefusalLine(path.basename(e.programPath), e.capabilities)
       + "\n  " + e.findings.join("\n  ");
+    case "RuntimeConfinementUnavailable": return "cannot execute doctor safely: " + e.detail;
   }
 }
 
@@ -121,28 +127,57 @@ export function supportsPermissionModel(): Promise<boolean> {
 }
 let probe: Promise<boolean> | undefined;
 
-// Node's permission model, applied to every doctor execution: filesystem
-// writes, subprocesses, and native addons are denied by the runtime itself
-// — an eval'd, obfuscated, or helper-module payload is stopped by the
-// process, whatever the static scan missed. Reads stay open (reading the
-// repo is a doctor's job); verify mode also writes to the temp dir, where
-// the loader seeds and cleans up fixture sandboxes. --allow-worker exists
-// for the import guard's hook thread only — denials propagate into worker
-// threads (verified: fs write and subprocess are denied inside them).
-// Network is not part of the permission model on current Node; the loader
-// strips the network globals instead. This never throws: an unprobeable
-// runtime just gets no flags.
-const PERMISSION_BASE = ["--permission", "--allow-fs-read=*", "--allow-worker", "--disable-warning=SecurityWarning"];
+// Node's permission model is a required runtime boundary for doctor code.
+// Read access is deliberately narrow: the any-doctor package itself, the
+// doctor program, and only the run target or verification fixtures. There is
+// no broad host read grant for a doctor to escape through a missed static
+// check. --allow-worker is for the import guard's hook thread; the doctor
+// cannot import Worker after confinement, and worker threads inherit every
+// other denial. Network is not covered by Node's permission model, so the
+// loader removes Node's builtin-module escape hatches before doctor code runs.
+// Native addons are enabled only so the loader can initialize its trusted,
+// package-owned analysis provider before it confines doctor code. The loader
+// removes process.dlopen before importing the doctor, so doctor code cannot
+// load an add-on of its own.
+const PERMISSION_BASE = ["--permission", "--allow-addons", "--allow-worker", "--disable-warning=SecurityWarning"];
+const canonicalPath = (value: string): string => {
+  try { return fs.realpathSync(value); } catch { return path.resolve(value); }
+};
+const PACKAGE_ROOT = canonicalPath(fileURLToPath(new URL("..", import.meta.url)));
 
 // Exported so the loader tests can spawn children in exactly the
 // configuration production creates — no fictional flag sets.
-export async function permissionArgs(allowTmpWrites: boolean): Promise<string[]> {
-  try {
-    if (!(await supportsPermissionModel())) return [];
-    return allowTmpWrites ? [...PERMISSION_BASE, `--allow-fs-write=${os.tmpdir()}`] : [...PERMISSION_BASE];
-  } catch {
-    return [];
+export async function permissionArgs(programPath: string, mode: Mode, verifyRoot?: string): Promise<string[]> {
+  if (!(await supportsPermissionModel())) {
+    throw new Error("Node's --permission model is required (use a supported Node runtime)");
   }
+  const readRoots = [PACKAGE_ROOT];
+  const addReadRoot = (value: string) => {
+    const root = canonicalPath(value);
+    if (!readRoots.some(allowed => root === allowed || root.startsWith(allowed + path.sep))) {
+      readRoots.push(root);
+    }
+  };
+  if (mode.kind === "run") addReadRoot(mode.root);
+  if (mode.kind === "verify") {
+    if (verifyRoot === undefined) throw new Error("verification requires a dedicated sandbox root");
+    addReadRoot(verifyRoot);
+    addReadRoot(mode.fixtures);
+    // Corpus fixtures are an explicit verification input, not inherited
+    // ambient state. When configured, grant only that directory and forward
+    // only its canonical path below.
+    if (process.env.ANY_DOCTOR_CORPUS_ROOT) addReadRoot(process.env.ANY_DOCTOR_CORPUS_ROOT);
+  }
+  addReadRoot(programPath);
+  // Node applies overlapping read grants in CLI order. Parents must precede
+  // descendants; otherwise an explicitly named doctor inside its target can
+  // shadow the target's recursive grant on Node 22.
+  const readArgs = [...readRoots]
+    .sort((a, b) => a.split(path.sep).length - b.split(path.sep).length)
+    .map(root => `--allow-fs-read=${root}`);
+  return mode.kind === "verify"
+    ? [...PERMISSION_BASE, ...readArgs, `--allow-fs-write=${canonicalPath(verifyRoot!)}`]
+    : [...PERMISSION_BASE, ...readArgs];
 }
 
 // Exported with its table: Node's denial phrasings vary across versions,
@@ -160,31 +195,107 @@ export function denialCapability(stderr: string): string {
   return "forbidden capability";
 }
 
-function spawnLoader(programPath: string, mode: Mode, timeoutMs: number, nodeFlags: string[]): Promise<LoaderOutput> {
+// A result frame can legitimately contain many findings. Keep enough room for
+// a useful large scan while still making the parent memory bound explicit.
+const MAX_LOADER_STREAM_BYTES = 16 * 1024 * 1024;
+const MAX_SEARCH_REQUEST_BYTES = 64 * 1024;
+const MAX_SEARCH_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_SEARCH_REQUESTS = 4096;
+
+function confinedEnv(verifyRoot?: string): NodeJS.ProcessEnv {
+  // Do not let arbitrary doctor code inspect credentials from developer or CI
+  // environments. On Windows SystemRoot is needed for child process startup;
+  // no other inherited value is necessary because the parent resolves Node by
+  // absolute path and owns all search subprocesses.
+  const env: NodeJS.ProcessEnv = process.platform === "win32" && process.env.SystemRoot
+    ? { SystemRoot: process.env.SystemRoot }
+    : {};
+  if (verifyRoot !== undefined) env.ANY_DOCTOR_VERIFY_ROOT = verifyRoot;
+  if (verifyRoot !== undefined && process.env.ANY_DOCTOR_CORPUS_ROOT) {
+    env.ANY_DOCTOR_CORPUS_ROOT = canonicalPath(process.env.ANY_DOCTOR_CORPUS_ROOT);
+  }
+  return env;
+}
+
+function loaderCwd(programPath: string, mode: Mode): string {
+  if (mode.kind === "run") return path.resolve(mode.root);
+  if (mode.kind === "verify") return path.dirname(path.resolve(mode.fixtures));
+  return path.dirname(path.resolve(programPath));
+}
+
+function spawnLoader(programPath: string, mode: Mode, timeoutMs: number, nodeFlags: string[], verifyRoot?: string): Promise<LoaderOutput> {
   return new Promise((resolve) => {
     const loader = fileURLToPath(new URL("doctor-loader.mjs", import.meta.url));
     const child = spawn(process.execPath, [...nodeFlags, loader, ...modeArgs(mode, programPath)], {
       stdio: ["pipe", "pipe", "pipe", "pipe"],
       timeout: timeoutMs,
+      cwd: loaderCwd(programPath, mode),
+      env: confinedEnv(verifyRoot),
     });
     let stdout = "";
     let stderr = "";
-    child.stdout?.on("data", (c: Buffer) => { stdout += c.toString("utf8"); });
-    child.stderr?.on("data", (c: Buffer) => { stderr += c.toString("utf8"); });
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let limited = false;
+    let limitReason = "";
+    const stopForOutputLimit = (reason: string) => {
+      if (limited) return;
+      limited = true;
+      limitReason = reason;
+      child.kill("SIGKILL");
+    };
+    child.stdout?.on("data", (c: Buffer) => {
+      stdoutBytes += c.length;
+      if (stdoutBytes > MAX_LOADER_STREAM_BYTES) return stopForOutputLimit("stdout exceeded the 16 MiB output limit");
+      stdout += c.toString("utf8");
+    });
+    child.stderr?.on("data", (c: Buffer) => {
+      stderrBytes += c.length;
+      if (stderrBytes > MAX_LOADER_STREAM_BYTES) return stopForOutputLimit("stderr exceeded the 16 MiB output limit");
+      stderr += c.toString("utf8");
+    });
     // fd 3 carries ctx.search requests; the search host answers on stdin.
     let pending = "";
-    child.stdio[3]?.on("data", (c: Buffer) => {
+    let searchRequests = 0;
+    const requestChannel = child.stdio[3] as Readable | undefined;
+    requestChannel?.on("data", (c: Buffer) => {
+      if (limited) return;
       pending += c.toString("utf8");
+      if (Buffer.byteLength(pending) > MAX_SEARCH_REQUEST_BYTES) {
+        stopForOutputLimit("a search request exceeded the 64 KiB protocol limit");
+        return;
+      }
       let nl: number;
       while ((nl = pending.indexOf("\n")) !== -1) {
         const line = pending.slice(0, nl);
         pending = pending.slice(nl + 1);
-        const response = handleSearchLine(line, mode);
-        if (response !== null) child.stdin?.write(SEARCH_RESULT + response + "\n");
+        if (++searchRequests > MAX_SEARCH_REQUESTS) {
+          stopForOutputLimit(`the doctor exceeded the ${MAX_SEARCH_REQUESTS} search-request limit`);
+          return;
+        }
+        const response = handleSearchLine(line, mode, undefined, verifyRoot);
+        if (response === null) continue;
+        const payload = SEARCH_RESULT + response + "\n";
+        if (Buffer.byteLength(payload) > MAX_SEARCH_RESPONSE_BYTES) {
+          stopForOutputLimit("a search response exceeded the 16 MiB protocol limit");
+          return;
+        }
+        // Respect stdin backpressure. Pausing the request pipe prevents the
+        // parent from accumulating arbitrary response bytes while the child
+        // is slow (or deliberately refuses to read).
+        if (child.stdin?.write(payload) === false) {
+          requestChannel.pause();
+          child.stdin.once("drain", () => requestChannel.resume());
+        }
       }
     });
+    child.stdin?.on("error", () => { /* the child may be killed for a limit breach */ });
     child.on("error", () => resolve({ status: null, stdout, stderr: stderr + "(loader failed to start)" }));
-    child.on("close", (status) => resolve({ status, stdout, stderr }));
+    child.on("close", (status) => resolve({
+      status,
+      stdout,
+      stderr: limited ? `${stderr}\nDoctor output limit exceeded: ${limitReason}` : stderr,
+    }));
   });
 }
 
@@ -216,6 +327,16 @@ const execLoader = (
     if (!fs.existsSync(abs)) {
       return yield* new ProgramMissing({ programPath: abs });
     }
+    // The resolver hook guards ESM only. Reject CommonJS/ambiguous entrypoints
+    // before they can invoke require(), leaving .mjs as the single executable
+    // doctor format and preserving the import boundary below.
+    if (path.extname(abs) !== ".mjs") {
+      return yield* new DoctorUnsafe({
+        programPath: abs,
+        capabilities: ["module format"],
+        findings: ["doctor programs must use the .mjs ESM format; CommonJS entrypoints are not confined"],
+      });
+    }
     if (fs.readFileSync(abs, "utf8").includes(SCAFFOLD_TODO)) {
       return yield* new ScaffoldIncomplete({ filePath: abs });
     }
@@ -227,40 +348,50 @@ const execLoader = (
         findings: gate.red.map(f => `${f.capability}: ${f.detail}`),
       });
     }
-    const nodeFlags = yield* Effect.promise(() => permissionArgs(mode.kind === "verify"));
-    const out = yield* Effect.tryPromise({
-      try: () => spawnLoader(abs, mode, timeoutMs, nodeFlags),
-      catch: (e): RunnerError => new DoctorCrashed({ programPath: abs, detail: String(e) }),
-    });
-    if (out.status !== 0) {
-      if (deniedByPermissionModel(out.stderr)) {
-        return yield* new DoctorUnsafe({
-          programPath: abs,
-          capabilities: [denialCapability(out.stderr)],
-          findings: ["the runtime refused a forbidden capability:", ...lastLines(out.stderr, 2).split("\n")],
-        });
-      }
-      return yield* new DoctorCrashed({ programPath: abs, detail: crashSummary(out.stderr || "exit " + out.status) });
-    }
-    const lines = out.stdout.split("\n");
-    // The last sentinel line wins. A doctor writing directly to
-    // process.stdout can forge a frame — accepted under the bug-not-
-    // adversary trust model (doctor programs are our own agents' output).
-    const idx = lines.findLastIndex(l => l.startsWith(RESULT_SENTINEL));
-    const stdout = out.stdout.slice(0, 500);
-    if (idx === -1) {
-      return yield* new NoFramedResult({ programPath: abs, stdout });
-    }
-    let frame: unknown;
+    const verifyRoot = mode.kind === "verify"
+      ? fs.mkdtempSync(path.join(os.tmpdir(), "any-doctor-verify-"))
+      : undefined;
     try {
-      frame = JSON.parse(lines[idx].slice(RESULT_SENTINEL.length));
-    } catch {
-      return yield* new NoFramedResult({ programPath: abs, stdout });
+      const nodeFlags = yield* Effect.tryPromise({
+        try: () => permissionArgs(abs, mode, verifyRoot),
+        catch: (e) => new RuntimeConfinementUnavailable({ detail: e instanceof Error ? e.message : String(e) }),
+      });
+      const out = yield* Effect.tryPromise({
+        try: () => spawnLoader(abs, mode, timeoutMs, nodeFlags, verifyRoot),
+        catch: (e): RunnerError => new DoctorCrashed({ programPath: abs, detail: String(e) }),
+      });
+      if (out.status !== 0) {
+        if (deniedByPermissionModel(out.stderr)) {
+          return yield* new DoctorUnsafe({
+            programPath: abs,
+            capabilities: [denialCapability(out.stderr)],
+            findings: ["the runtime refused a forbidden capability:", ...lastLines(out.stderr, 2).split("\n")],
+          });
+        }
+        return yield* new DoctorCrashed({ programPath: abs, detail: crashSummary(out.stderr || "exit " + out.status) });
+      }
+      const lines = out.stdout.split("\n");
+      // The last sentinel line wins. A doctor writing directly to
+      // process.stdout can forge a frame — accepted under the bug-not-
+      // adversary trust model (doctor programs are our own agents' output).
+      const idx = lines.findLastIndex(l => l.startsWith(RESULT_SENTINEL));
+      const stdout = out.stdout.slice(0, 500);
+      if (idx === -1) {
+        return yield* new NoFramedResult({ programPath: abs, stdout });
+      }
+      let frame: unknown;
+      try {
+        frame = JSON.parse(lines[idx].slice(RESULT_SENTINEL.length));
+      } catch {
+        return yield* new NoFramedResult({ programPath: abs, stdout });
+      }
+      if (frame === null || typeof frame !== "object") {
+        return yield* new NoFramedResult({ programPath: abs, stdout });
+      }
+      return frame as Record<string, unknown>;
+    } finally {
+      if (verifyRoot !== undefined) fs.rmSync(verifyRoot, { recursive: true, force: true });
     }
-    if (frame === null || typeof frame !== "object") {
-      return yield* new NoFramedResult({ programPath: abs, stdout });
-    }
-    return frame as Record<string, unknown>;
   });
 
 // Frames decode by their declared kind — the contract's Frame union is the

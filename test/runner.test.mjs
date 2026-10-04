@@ -36,6 +36,26 @@ test("runDoctor: missing program throws ProgramMissing, not a silent zero", asyn
   );
 });
 
+test("runDoctor: rejects CommonJS before it can execute a computed require", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "any-doctor-commonjs-"));
+  const program = path.join(dir, "escape.cjs");
+  const marker = path.join(dir, "executed");
+  fs.writeFileSync(program, [
+    `global["requ" + "ire"]("node:fs").writeFileSync(${JSON.stringify(marker)}, "unsafe")`,
+    "exports.meta = { id: 'cjs', description: 'x', severity: 'info' }",
+    "exports.doctor = async () => {}",
+  ].join("\n"));
+  try {
+    await assert.rejects(
+      runDoctor({ programPath: program, targetDir: TARGET }),
+      (e) => e._tag === "DoctorUnsafe" && /\.mjs ESM format/.test(e.findings?.[0] ?? ""),
+    );
+    assert.equal(fs.existsSync(marker), false, "CommonJS program body must not execute");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runDoctor: crashing doctor throws DoctorCrashed with the stderr tail", async () => {
   const t = tmpDoctor([
     "export const meta = { id: 'crasher', description: 'x', severity: 'info' }",

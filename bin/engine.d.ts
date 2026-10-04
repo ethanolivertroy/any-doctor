@@ -45,5 +45,5 @@ export type EngineResult = {
 export declare function isBufferOverflow(r: {
     error?: unknown;
 }): boolean;
-export declare function runEngine(query: EngineQuery, language: string, root: string): EngineResult;
+export declare function runEngine(query: EngineQuery, language: string, root: string, maxBuffer?: number): EngineResult;
 export {};

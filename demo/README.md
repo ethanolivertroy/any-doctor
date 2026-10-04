@@ -34,8 +34,8 @@ What happens:
 (file write); `bad.mjs` shells out with `execSync` (subprocess). Their
 payloads can never fire: the gate statically scans each program before
 execution and refuses it, in every mode — and under the hood, doctors also
-execute under Node's permission model, which denies writes and subprocesses
-at the process level even if a payload evades the scan (worker threads
-exist only as the import guard's carrier and inherit every denial). A
-doctor's entire legitimate world is the repo on disk via `ctx`; anything
-beyond that is out of contract.
+run with a minimal environment and Node permission grants limited to the
+runtime, doctor, and target paths. The runtime denies writes and subprocesses
+even if a payload evades the scan; module-loading escape hatches are removed
+before doctor code runs. A doctor's entire legitimate world is the repo on
+disk via `ctx`; anything beyond that is out of contract.

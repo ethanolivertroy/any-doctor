@@ -3,13 +3,16 @@ import * as path from "path";
 import { decodeSearchOp, includeTestsFor, isTestPath, SEARCH_REQUEST, searchBase, withinBase } from "./contract.js";
 import { runEngine } from "./engine.js";
 import { handleAnalysisRequest } from "./analysis-host.js";
+// The host performs ast-grep work on behalf of untrusted code. Bound the
+// engine output before JSON parsing, not only after a response was built.
+const MAX_SEARCH_RESPONSE_BYTES = 16 * 1024 * 1024;
 // One request line in, one response body out (the SEARCH_RESULT sentinel
 // is framing added by the transport in the runner). Returns null for lines
 // that are not requests. The op discriminator selects the engine query
 // shape and now decodes through the contract's one home — an unknown op
 // is a loud error, never a silent pattern search. Analysis requests route
 // to the sibling analysis host.
-export function handleSearchLine(line, mode, engine = runEngine) {
+export function handleSearchLine(line, mode, engine = runEngine, allowedRoot) {
     var _a, _b, _c, _d;
     if (!line.startsWith(SEARCH_REQUEST))
         return null;
@@ -20,7 +23,7 @@ export function handleSearchLine(line, mode, engine = runEngine) {
     catch {
         return JSON.stringify({ error: "ctx.search failed: malformed host request" });
     }
-    const base = searchBase(mode);
+    const base = allowedRoot !== null && allowedRoot !== void 0 ? allowedRoot : searchBase(mode);
     // resolve() collapses `..` and anchors relatives — a prefix check on the
     // raw string would let /target/../../etc through.
     const root = typeof req.root === "string" ? path.resolve(req.root) : "";
@@ -31,7 +34,7 @@ export function handleSearchLine(line, mode, engine = runEngine) {
     if ("error" in decoded)
         return JSON.stringify({ error: decoded.error });
     if (decoded.op === "analysis") {
-        return JSON.stringify(handleAnalysisRequest({ kind: req.kind, file: req.file, root: req.root, sourceDigest: req.sourceDigest, expression: req.expression, query: req.query }, mode));
+        return JSON.stringify(handleAnalysisRequest({ kind: req.kind, file: req.file, root: req.root, sourceDigest: req.sourceDigest, expression: req.expression, query: req.query }, mode, undefined, undefined, undefined, undefined, allowedRoot));
     }
     const language = typeof req.language === "string" ? req.language : "TypeScript";
     const query = decoded.op === "rule"
@@ -39,7 +42,7 @@ export function handleSearchLine(line, mode, engine = runEngine) {
         : decoded.op === "rules"
             ? { op: decoded.op, rules: ((_c = req.rules) !== null && _c !== void 0 ? _c : []) }
             : { op: decoded.op, pattern: String((_d = req.pattern) !== null && _d !== void 0 ? _d : "") };
-    const r = engine(query, language, root);
+    const r = engine(query, language, root, MAX_SEARCH_RESPONSE_BYTES);
     if (!r.ok)
         return JSON.stringify({ error: r.error });
     const config = readAnalysisConfig(root);

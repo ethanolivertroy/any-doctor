@@ -11,6 +11,7 @@ const RULES = [
     { capability: "file write", level: "red", on: "masked", kind: "write call (destructured import)", pattern: /\b(?:writeFile|appendFile|createWriteStream|rmSync|unlinkSync|rm|unlink)\s*\(/ },
     { capability: "subprocess", level: "red", on: "raw", kind: "child_process import", pattern: new RegExp(MODULE_SPEC.source + String.raw `child_process["']`) },
     { capability: "subprocess", level: "red", on: "masked", kind: "process spawn call", pattern: /(?<![.\w])(?:exec|execSync|spawn|spawnSync|execFile|execFileSync|fork)\s*\(/ },
+    { capability: "runtime escape", level: "red", on: "masked", kind: "Node builtin-module escape hatch", pattern: /\bprocess\s*\.\s*(?:getBuiltinModule|binding|_linkedBinding|dlopen|mainModule)\b/ },
     // A doctor is a single self-contained file: no imports of any kind.
     { capability: "import", level: "red", on: "raw", kind: "import statement (doctors are single-file programs)", pattern: /(?:\bimport\b|\bexport\b)[^\n]*\bfrom\s*["'][^"']*["']/ },
     { capability: "import", level: "red", on: "raw", kind: "side-effect import (doctors are single-file programs)", pattern: /^\s*import\s*["'][^"']*["']/ },

@@ -26,6 +26,16 @@ test("confineProcess: the network globals are gone before any doctor code runs",
   assert.equal(r.out, "undefined undefined");
 });
 
+test("confineProcess: Node runtime escape hatches are unavailable", () => {
+  const r = probe(`
+    const { confineProcess } = await import(${JSON.stringify(LOADER)});
+    confineProcess();
+    console.log(typeof process.getBuiltinModule, typeof process.binding, typeof process._linkedBinding, typeof process.dlopen);
+  `);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(r.out, "undefined undefined undefined undefined");
+});
+
 test("confineProcess: after registration, every import is refused — including the probe's own", () => {
   const r = probe(`
     const { confineProcess } = await import(${JSON.stringify(LOADER)});

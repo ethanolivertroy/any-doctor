@@ -117,15 +117,17 @@ diagnostics on stderr.
 
 ## Confinement
 
-The layered policy that makes a doctor program safe to execute. A doctor is
-a single self-contained file: it may not import anything, and everything
-else reaches it through `ctx`. The layers, in order: the static capability
-scan refuses named capabilities before execution; the run happens under
-Node's permission model (writes, subprocesses, and native addons denied;
-worker threads exist only as the import guard's carrier and inherit every
-denial); an import guard refuses every module resolution a doctor attempts;
-and the network globals are deleted from the process before doctor code
-runs. There is no override in any mode.
+The layered policy that confines a doctor program. A doctor is a single
+self-contained file: it may not import anything, and everything else reaches
+it through `ctx`. The layers, in order: the static capability scan refuses
+named capabilities before execution; a required Node permission model grants
+read access only to the any-doctor runtime, the doctor, and its target or
+fixtures (and denies writes, subprocesses, and native addons); the child
+receives a minimal environment; an import guard refuses every module
+resolution a doctor attempts; public Node module-loading escape hatches and
+network globals are removed before doctor code runs; and loader streams and
+search requests are bounded. There is no override in any mode. This is
+defense in depth, not an OS-level sandbox for fully hostile code.
 
 ## Finding
 

@@ -1,5 +1,5 @@
 import { Cause, Schema } from "effect";
-import { DoctorMeta, RunResult, VerifyRunResult } from "./contract.js";
+import { DoctorMeta, Mode, RunResult, VerifyRunResult } from "./contract.js";
 declare const ProgramMissing_base: Schema.Class<ProgramMissing, Schema.TaggedStruct<"ProgramMissing", {
     readonly programPath: Schema.String;
 }>, Cause.YieldableError>;
@@ -35,7 +35,12 @@ declare const DoctorUnsafe_base: Schema.Class<DoctorUnsafe, Schema.TaggedStruct<
 }>, Cause.YieldableError>;
 export declare class DoctorUnsafe extends DoctorUnsafe_base {
 }
-export type RunnerError = ProgramMissing | FixturesMissing | ScaffoldIncomplete | DoctorCrashed | NoFramedResult | DoctorUnsafe;
+declare const RuntimeConfinementUnavailable_base: Schema.Class<RuntimeConfinementUnavailable, Schema.TaggedStruct<"RuntimeConfinementUnavailable", {
+    readonly detail: Schema.String;
+}>, Cause.YieldableError>;
+export declare class RuntimeConfinementUnavailable extends RuntimeConfinementUnavailable_base {
+}
+export type RunnerError = ProgramMissing | FixturesMissing | ScaffoldIncomplete | DoctorCrashed | NoFramedResult | DoctorUnsafe | RuntimeConfinementUnavailable;
 export declare function isRunnerError(e: unknown): e is RunnerError;
 export declare function describeRunnerError(e: RunnerError): string;
 export declare function causeSummaryLine(e: RunnerError | undefined): string;
@@ -54,7 +59,7 @@ export interface MetaRead {
     cause?: RunnerError;
 }
 export declare function supportsPermissionModel(): Promise<boolean>;
-export declare function permissionArgs(allowTmpWrites: boolean): Promise<string[]>;
+export declare function permissionArgs(programPath: string, mode: Mode, verifyRoot?: string): Promise<string[]>;
 export declare function deniedByPermissionModel(stderr: string): boolean;
 export declare function denialCapability(stderr: string): string;
 export declare function runDoctor(options: RunOptions): Promise<RunResult>;
