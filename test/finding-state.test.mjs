@@ -160,7 +160,9 @@ test("decisions: an interrupted write leaves the original intact (atomicity)", (
   assert.equal(mem.get(decisionsPath(dir)), before, "the failed write changed nothing on record");
 });
 
-test("decisions: a present-but-unreadable file refuses loudly and is never replaced", () => {
+test("decisions: a present-but-unreadable file refuses loudly and is never replaced", {
+  skip: process.getuid?.() === 0 && "root bypasses POSIX mode bits; this permission probe requires a non-root process",
+}, () => {
   const dir = tmpDir();
   fs.mkdirSync(path.dirname(decisionsPath(dir)), { recursive: true });
   fs.writeFileSync(decisionsPath(dir), JSON.stringify({ schema: 1, decisions: [] }));

@@ -140,7 +140,7 @@ export const fixtures = [
     reported as weaker). One-line findings don't need it.
 
 Zero dependencies, zero imports — a doctor is one self-contained file;
-everything reaches it through `ctx`. Node >= 18.
+everything reaches it through `ctx`. Node >= 20.
 
 ## Rule queries — ask structure, don't parse text
 
@@ -446,11 +446,12 @@ and refuses to execute it — there is no override:
 - `process.env` is flagged too. If you need configuration, it does not
   belong in a doctor — the target repo is the input.
 
-The scan is layered with runtime enforcement: on runtimes that support it,
-doctors execute under Node's permission model, so file writes and
-subprocesses are denied by the process itself — even code the scan cannot
-see. Worker threads exist only as the import guard's carrier and inherit
-every denial.
+The scan is layered with runtime enforcement: the runner requires Node's
+permission model, gives the child a minimal environment, grants filesystem
+reads only to its runtime/doctor/target paths, and removes public module-
+loading escape hatches before doctor code runs. Worker threads exist
+only as the import guard's carrier and inherit every denial. This is defense
+in depth, not an OS-level sandbox for fully hostile code.
 
 One helper used to recur across doctor programs by design — the
 comment/string masking function, copied file to file under the

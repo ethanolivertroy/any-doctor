@@ -26,15 +26,28 @@ function seed(root, files) {
 
 // Children spawn in exactly the configuration production creates: the
 // runner's own permission flags and a four-pipe stdio (fd 3 is the search
-// channel). Verify runs additionally get temp-dir writes for fixture
-// sandboxes — mirroring permissionArgs(true).
+// channel). Verify runs get a dedicated scratch root, rather than broad
+// read/write access to the system temp directory.
 async function runLoader(args) {
-  const flags = await permissionArgs(args.includes("--verify"));
+  const isVerify = args[1] === "--verify";
+  const mode = args[1] === "--meta"
+    ? { kind: "meta" }
+    : isVerify
+      ? { kind: "verify", fixtures: args[2] }
+      : { kind: "run", root: args[1], includeTests: args[2] === "--include-tests" };
+  const verifyRoot = isVerify ? fs.mkdtempSync(path.join(os.tmpdir(), "any-doctor-loader-test-")) : undefined;
+  const flags = await permissionArgs(args[0], mode, verifyRoot);
   try {
-    const out = execFileSync(node, [...flags, loader, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", "pipe"] });
+    const out = execFileSync(node, [...flags, loader, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
+      env: { ...process.env, ...(verifyRoot ? { ANY_DOCTOR_VERIFY_ROOT: verifyRoot } : {}) },
+    });
     return { status: 0, stdout: out, stderr: "" };
   } catch (e) {
     return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+  } finally {
+    if (verifyRoot) fs.rmSync(verifyRoot, { recursive: true, force: true });
   }
 }
 
@@ -81,6 +94,21 @@ test("invalid meta severity is rejected", async () => {
   const r = await runLoader([bad, root]);
   assert.equal(r.status, 3);
   assert.match(r.stderr, /meta\.severity/);
+});
+
+test("direct loader invocation rejects a CommonJS entrypoint before executing it", async () => {
+  const root = tmpRoot();
+  const doctor = path.join(root, "escape.cjs");
+  const marker = path.join(root, "executed");
+  fs.writeFileSync(doctor, `global["requ" + "ire"]("node:fs").writeFileSync(${JSON.stringify(marker)}, "unsafe")`);
+  try {
+    const r = await runLoader([doctor, root]);
+    assert.equal(r.status, 3);
+    assert.match(r.stderr, /\.mjs ESM format/);
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("seed path traversal becomes a named failing fixture, siblings still run", async () => {

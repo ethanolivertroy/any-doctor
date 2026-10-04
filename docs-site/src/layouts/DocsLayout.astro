@@ -191,9 +191,13 @@ const hasPagination = Astro.slots.has("pagination");
                   variant="caution"
                   content={
                     currentSiblingUrl
-                      ? `This is the <strong>${versionStatus.version}</strong> version of the docs and is no longer maintained. The latest version of this page is at <a href="${currentSiblingUrl}">${currentSiblingUrl}</a>.`
-                      : `This is the <strong>${versionStatus.version}</strong> version of the docs and is no longer maintained. See the <a href="${homeHref}">current docs</a> for up-to-date content.`
+                      ? `This is the ${versionStatus.version} version of the docs and is no longer maintained. The latest version of this page is at `
+                      : `This is the ${versionStatus.version} version of the docs and is no longer maintained. See `
                   }
+                  link={currentSiblingUrl
+                    ? { href: currentSiblingUrl, text: currentSiblingUrl }
+                    : { href: homeHref, text: "the current docs" }}
+                  suffix={currentSiblingUrl ? "." : " for up-to-date content."}
                 />
               )}
               {banner && <Banner content={banner.content} variant={banner.type} dismissible={banner.dismissible} />}

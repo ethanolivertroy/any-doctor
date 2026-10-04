@@ -37,6 +37,21 @@ test("handleSearchLine: verify mode may search only its sandbox prefix, not the 
   assert.deepEqual(parse(allow), { matches: [] });
 });
 
+test("handleSearchLine: a runner-provided verify root excludes sibling verification sandboxes", () => {
+  const verify = { kind: "verify", fixtures: "/x.fixtures.mjs" };
+  const own = path.join(os.tmpdir(), "any-doctor-verify-own");
+  const sibling = path.join(os.tmpdir(), "any-doctor-verify-sibling");
+  const engine = fakeEngine(() => ({ ok: true, matches: [] }));
+  assert.deepEqual(
+    parse(handleSearchLine(request({ pattern: "x", root: own }), verify, engine, own)),
+    { matches: [] },
+  );
+  assert.match(
+    parse(handleSearchLine(request({ pattern: "x", root: sibling }), verify, engine, own)).error,
+    /outside the allowed target/,
+  );
+});
+
 test("handleSearchLine: non-request lines are ignored, not answered", () => {
   assert.equal(handleSearchLine("hello", RUN, fakeEngine(() => { throw new Error("must not run"); })), null);
 });

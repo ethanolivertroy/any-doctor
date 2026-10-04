@@ -100,7 +100,13 @@ function materializeSeed(tmp, rel, content) {
 // clean up. A crashing sandbox is a named failing result (or the caller's
 // error row) — siblings always run.
 async function inSandbox(seed, run) {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "any-doctor-verify-"));
+    var _a;
+    // The runner creates this dedicated parent before the child starts and
+    // grants it read/write permission. Falling back to os.tmpdir keeps direct
+    // host-side uses of certify working, while doctor processes never receive a
+    // broad /tmp permission.
+    const verifyRoot = (_a = process.env.ANY_DOCTOR_VERIFY_ROOT) !== null && _a !== void 0 ? _a : os.tmpdir();
+    const tmp = fs.mkdtempSync(path.join(verifyRoot, "any-doctor-verify-"));
     try {
         for (const [rel, content] of Object.entries(seed))
             materializeSeed(tmp, rel, content);

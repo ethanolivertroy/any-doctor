@@ -40,5 +40,5 @@ export type AnalysisResponse = {
 } | {
     error: string;
 };
-export declare function handleAnalysisRequest(req: AnalysisRequestBody, mode: Mode, analyzer?: Analyzer, status?: Status, spansAnalyzer?: SpansAnalyzer, callsAnalyzer?: typeof analyzeCalls): AnalysisResponse;
+export declare function handleAnalysisRequest(req: AnalysisRequestBody, mode: Mode, analyzer?: Analyzer, status?: Status, spansAnalyzer?: SpansAnalyzer, callsAnalyzer?: typeof analyzeCalls, allowedRoot?: string): AnalysisResponse;
 export {};

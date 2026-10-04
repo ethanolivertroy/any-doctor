@@ -43,9 +43,9 @@ const semanticHandlers = {
     "option-presence": semanticHandler(parseOptionQuery, optionPresenceResult),
     ...recipeSemanticHandlers,
 };
-export function handleAnalysisRequest(req, mode, analyzer = analyzeBindings, status = analysisStatus, spansAnalyzer = analyzeSpans, callsAnalyzer = analyzeCalls) {
+export function handleAnalysisRequest(req, mode, analyzer = analyzeBindings, status = analysisStatus, spansAnalyzer = analyzeSpans, callsAnalyzer = analyzeCalls, allowedRoot) {
     var _a;
-    const base = searchBase(mode);
+    const base = allowedRoot !== null && allowedRoot !== void 0 ? allowedRoot : searchBase(mode);
     const root = typeof req.root === "string" ? path.resolve(req.root) : "";
     if (base === "" || !withinBase(root, base)) {
         return { error: "ctx.analysis failed: analysis root is outside the allowed target" };

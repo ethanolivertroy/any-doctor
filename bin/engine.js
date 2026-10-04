@@ -100,17 +100,18 @@ const MAX_BUFFER_BYTES = 256 * 1024 * 1024;
 // name first (no deprecation warning on stderr), fall back once. The
 // spawn options are one const so the fallback cannot drift from the
 // first try.
-const SPAWN_OPTS = { encoding: "utf8", timeout: 120000, maxBuffer: MAX_BUFFER_BYTES };
-function invoke(args, root) {
+const SPAWN_OPTS = { encoding: "utf8", timeout: 120000 };
+function invoke(args, root, maxBuffer) {
+    const opts = { ...SPAWN_OPTS, maxBuffer };
     const bundled = resolveAstGrepBinary();
     if (bundled !== null) {
-        return spawnSync(bundled, [...args, root], SPAWN_OPTS);
+        return spawnSync(bundled, [...args, root], opts);
     }
     // No bundled binary (unsupported platform or stripped install): the
     // user's own ast-grep, then its old name.
-    let r = spawnSync("ast-grep", [...args, root], SPAWN_OPTS);
+    let r = spawnSync("ast-grep", [...args, root], opts);
     if (r.error && r.error.code === "ENOENT") {
-        r = spawnSync("sg", [...args, root], SPAWN_OPTS);
+        r = spawnSync("sg", [...args, root], opts);
     }
     return r;
 }
@@ -133,7 +134,7 @@ export function isBufferOverflow(r) {
 function tooOld(stderr) {
     return /--inline-rules|unrecognized subcommand|unexpected argument/.test(stderr);
 }
-export function runEngine(query, language, root) {
+export function runEngine(query, language, root, maxBuffer = MAX_BUFFER_BYTES) {
     let args;
     if (query.op === "pattern") {
         args = ["run", "-p", query.pattern, "-l", language, "--json"];
@@ -151,7 +152,7 @@ export function runEngine(query, language, root) {
             "--json",
         ];
     }
-    const r = invoke(args, root);
+    const r = invoke(args, root, maxBuffer);
     if (missingEngine(r)) {
         return {
             ok: false,
@@ -161,7 +162,7 @@ export function runEngine(query, language, root) {
     if (isBufferOverflow(r)) {
         return {
             ok: false,
-            error: `ctx.search outgrew the engine's ${MAX_BUFFER_BYTES / (1024 * 1024)}MB output buffer — the query matches too much code for one batch; narrow the patterns or split the batch`,
+            error: `ctx.search outgrew the engine's ${maxBuffer / (1024 * 1024)}MB output buffer — the query matches too much code for one batch; narrow the patterns or split the batch`,
         };
     }
     if (r.status !== 0 && !String(r.stdout).trim()) {
